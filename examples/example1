@@ -1,0 +1,12 @@
+
+inductive nat : Set {
+    O : nat;
+    S : nat -> nat;
+}
+
+fixpoint plus (x y : nat) : nat {
+    match x {
+        nat::O => y;
+        nat::S xx => plus xx (nat::S y);
+    }
+}

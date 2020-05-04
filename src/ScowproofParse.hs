@@ -3,12 +3,12 @@ module ScowproofParse where
 
 import System.IO
 import Control.Monad
+import Data.List
 import Data.Functor
 import Text.ParserCombinators.Parsec
 import Text.ParserCombinators.Parsec.Expr
 import Text.ParserCombinators.Parsec.Language
 import qualified Text.ParserCombinators.Parsec.Token as Token
-import qualified Data.Functor.Identity
 
 type VariableName = String
 type OptionalAnnot = Maybe Expr
@@ -16,6 +16,10 @@ type OptionalAnnot = Maybe Expr
 data Binder = Binder VariableName OptionalAnnot deriving Show
 
 data MatchArm = MatchArm Expr Expr deriving Show
+
+data Literal =
+    LitNat Integer
+    deriving Show
 
 data Expr =
     ExprVar String
@@ -27,6 +31,7 @@ data Expr =
     | ExprFix String [Binder] OptionalAnnot Expr
     | ExprMatch Expr (Maybe Expr) (Maybe Expr) (Maybe Expr) [MatchArm]
     | ExprAnnot Expr Expr
+    | ExprLit Literal
     deriving Show
 
 data InductiveConstructor = InductiveConstructor VariableName [Binder] Expr deriving Show
@@ -48,7 +53,7 @@ languageDef = emptyDef {
 	Token.identLetter     = alphaNum,
 	Token.reservedNames   = [
 		"let", "fixpoint", "axiom", "inductive", "infer", "check", "eval",
-        "forall", "fun", "fix", "match", "in", "with", "return"
+        "forall", "fun", "fix", "match", "as", "in", "return"
 	],
 	Token.reservedOpNames = []
 }
@@ -60,28 +65,31 @@ reserved   = Token.reserved   lexer -- parses a reserved name
 reservedOp = Token.reservedOp lexer -- parses an operator
 symbol     = Token.symbol     lexer
 
-parens     = Token.parens     lexer -- parses surrounding parenthesis
-integer    = Token.integer    lexer -- parses an integer
+parens     = Token.parens     lexer -- parses surrounding parentheses
+natural    = Token.natural    lexer -- parses a natural number
 semi       = Token.semi       lexer -- parses a semicolon
 whiteSpace = Token.whiteSpace lexer -- parses whitespace
 
 parseOptionalTypeAnnotation :: Parser OptionalAnnot
 parseOptionalTypeAnnotation =
     -- This try is necessary here e.g. "let a := b;" could start to parse "a :" as an annotation.
-    try (symbol ":" >> parseExpr <&> Just)
+    try (symbol ":" >> Just <$> parseExpr)
     <|> return Nothing
 
 parseExprAtom :: Parser Expr
 parseExprAtom =
     -- This try is necessary here e.g. "(a : b)" fails to parse as an expr, but is an annotation.
     try (parens parseExpr)
-    <|> liftM ExprVar identifier
+    <|> parseVar
     <|> parseFun
     <|> parseFix
     <|> parseLet
     <|> parsePi
+    <|> parseMatch
     <|> parseAnnot
+    <|> parseNat
     where
+        parseVar = ExprVar <$> intercalate "::" <$> sepBy1 identifier (try $ symbol "::")
         parseFun = do
             reserved "fun"
             binders <- parseAtLeastOneBinder
@@ -111,12 +119,23 @@ parseExprAtom =
             symbol ","
             expr <- parseExpr
             return $ ExprPi binders expr
+        parseMatch = do
+            reserved "match"
+            scrutinee <- parseExpr
+            asClause <- optionMaybe (reserved "as" >> parseExpr)
+            inClause <- optionMaybe (reserved "in" >> parseExpr)
+            returnClause <- optionMaybe (reserved "return" >> parseExpr)
+            symbol "{"
+            arms <- sepEndBy parseMatchArm semi
+            symbol "}"
+            return $ ExprMatch scrutinee asClause inClause returnClause arms
         parseAnnot = parens (do
                 expr1 <- parseExpr
                 symbol ":"
                 expr2 <- parseExpr
                 return $ ExprAnnot expr1 expr2
             )
+        parseNat = ExprLit <$> LitNat <$> natural
 
 operators = [
 		[Infix (return ExprApp) AssocLeft],
@@ -148,7 +167,7 @@ parseSingleBinderIntoBinderList = parens binderGroup <|> unannotatedVar
 -- However, I'd like to (as Coq does), but I think it might require more backtracking elsewhere.
 -- e.g. I'd like to support "fun x : nat => x".
 parseBinders :: Parser [Binder]
-parseBinders = liftM join $ many parseSingleBinderIntoBinderList
+parseBinders = join <$> many parseSingleBinderIntoBinderList
 
 parseAtLeastOneBinder :: Parser [Binder]
 parseAtLeastOneBinder = do
@@ -166,83 +185,76 @@ parseInductiveConstructor = do
     expr <- parseExpr
     return $ InductiveConstructor name binders expr
 
-parseInductiveConstructors :: Parser [InductiveConstructor]
-parseInductiveConstructors = sepEndBy parseInductiveConstructor semi
-
-parseDefinition :: Parser Vernac
-parseDefinition = do
-    reserved "let"
-    name <- identifier
-    binders <- parseBinders
-    annot <- parseOptionalTypeAnnotation
-    symbol ":="
-    expr <- parseExpr
-    semi
-    return $ VernacDefinition name binders annot expr
-
-parseFixpoint :: Parser Vernac
-parseFixpoint = do
-    reserved "fixpoint"
-    name <- identifier
-    binders <- parseAtLeastOneBinder
-    annot <- parseOptionalTypeAnnotation
-    symbol "{"
-    expr <- parseExpr
-    symbol "}"
-    return $ VernacDefinition name binders annot expr
-
-parseAxiom :: Parser Vernac
-parseAxiom = do
-    reserved "axiom"
-    name <- identifier
-    symbol ":"
-    expr <- parseExpr
-    semi
-    return $ VernacAxiom name expr
-
-parseInductive :: Parser Vernac
-parseInductive = do
-    reserved "inductive"
-    name <- identifier
-    binders <- parseBinders
-    annot <- parseOptionalTypeAnnotation
-    symbol "{"
-    constructors <- parseInductiveConstructors
-    symbol "}"
-    return $ VernacInductive name binders annot constructors
-
-parseInfer :: Parser Vernac
-parseInfer = do
-    reserved "infer"
-    expr <- parseExpr
-    semi
-    return $ VernacInfer expr
-
-parseCheck :: Parser Vernac
-parseCheck = do
-    reserved "check"
-    expr1 <- parseExpr
-    symbol ":"
-    expr2 <- parseExpr
-    semi
-    return $ VernacCheck expr1 expr2
-
-parseEval :: Parser Vernac
-parseEval = do
-    reserved "eval"
-    expr <- parseExpr
-    semi
-    return $ VernacEval expr
+parseMatchArm :: Parser MatchArm
+parseMatchArm = do
+    pat <- parseExpr
+    symbol "=>" -- Do I need to think hard here about partial consumption?
+    result <- parseExpr
+    return $ MatchArm pat result
 
 parseVernac :: Parser Vernac
 parseVernac =
     parseDefinition
-    <|> parseFixpoint -- This actually desugars into a definition immediately.
+    <|> parseFixpoint
     <|> parseAxiom
     <|> parseInductive
     <|> parseInfer
     <|> parseCheck
     <|> parseEval
+    where
+        parseDefinition = do
+            reserved "let"
+            name <- identifier
+            binders <- parseBinders
+            annot <- parseOptionalTypeAnnotation
+            symbol ":="
+            expr <- parseExpr
+            semi
+            return $ VernacDefinition name binders annot expr
+        -- Fixpoints actually desugar into definitions immediately.
+        parseFixpoint = do
+            reserved "fixpoint"
+            name <- identifier
+            binders <- parseAtLeastOneBinder
+            annot <- parseOptionalTypeAnnotation
+            symbol "{"
+            body <- parseExpr
+            symbol "}"
+            return $ VernacDefinition name [] Nothing (ExprFix name binders annot body)
+        parseAxiom = do
+            reserved "axiom"
+            name <- identifier
+            symbol ":"
+            expr <- parseExpr
+            semi
+            return $ VernacAxiom name expr
+        parseInductive = do
+            reserved "inductive"
+            name <- identifier
+            binders <- parseBinders
+            annot <- parseOptionalTypeAnnotation
+            symbol "{"
+            constructors <- sepEndBy parseInductiveConstructor semi
+            symbol "}"
+            return $ VernacInductive name binders annot constructors
+        parseInfer = do
+            reserved "infer"
+            expr <- parseExpr
+            semi
+            return $ VernacInfer expr
+        parseCheck = do
+            reserved "check"
+            expr1 <- parseExpr
+            symbol ":"
+            expr2 <- parseExpr
+            semi
+            return $ VernacCheck expr1 expr2
+        parseEval = do
+            reserved "eval"
+            expr <- parseExpr
+            semi
+            return $ VernacEval expr
+
 
 parseProgramBlock :: Parser [Vernac]
 parseProgramBlock = do
