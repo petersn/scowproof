@@ -15,14 +15,14 @@ fixpoint plus (x y : nat) : nat {
 eval plus 2 2;
 
 // The type of the induction principle on naturals.
-let nat_ind_type :=
+let nat_ind_type =
     forall (P : nat -> Prop),
         P nat::O ->
         (forall (n : nat), P n -> P (nat::S n)) ->
         forall (n : nat), P n;
 
 // A proof of the above type.
-let nat_ind :=
+let nat_ind =
     fun
         (P : nat -> Prop)
         (base_case : P nat::O)

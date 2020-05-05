@@ -21,7 +21,7 @@ data Literal =
     deriving (Show, Eq, Ord)
 
 data Expr =
-    ExprVar VariableName
+      ExprVar VariableName
     | ExprApp Expr Expr
     | ExprAbs [TypedName] Expr
     | ExprLet TypedName Expr Expr
@@ -37,13 +37,13 @@ data Expr =
 data InductiveConstructorExpr = InductiveConstructorExpr VariableName [TypedName] Expr deriving (Show, Eq, Ord)
 
 data Command =
-    CmdInfer Expr
+      CmdInfer Expr
     | CmdCheck Expr Expr
     | CmdEval Expr
     deriving (Show, Eq, Ord)
 
 data Vernac =
-    VernacDefinition VariableName [TypedName] OptionalExprAnnot Expr
+      VernacDefinition VariableName [TypedName] OptionalExprAnnot Expr
     | VernacAxiom VariableName Expr
     | VernacInductive VariableName [TypedName] OptionalExprAnnot [InductiveConstructorExpr]
     | VernacCommand Command
@@ -203,7 +203,7 @@ parseVernac =
             name <- identifier
             binders <- parseBinders
             annot <- parseOptionalTypeAnnotation
-            symbol ":="
+            symbol "="
             expr <- parseExpr
             semi
             return $ VernacDefinition name binders annot expr

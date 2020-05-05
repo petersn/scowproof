@@ -16,12 +16,12 @@ data Binder = Binder VariableName OptionalTypeAnnot deriving (Show, Eq, Ord)
 data MatchArm = MatchArm VariableName [Binder] Term deriving (Show, Eq, Ord)
 
 data InClause =
-    InPresent VariableName [VariableName]
+      InPresent VariableName [VariableName]
     | InAbsent
     deriving (Show, Eq, Ord)
 
 data Term =
-    TermVar VariableName
+      TermVar VariableName
     | TermApp Term Term
     | TermAbs Binder Term
 --    | TermLet Binder Term Term
@@ -92,10 +92,16 @@ freeVars (TermAnnot e ty) = freeVars e `Set.union` freeVars ty
 freeVars (TermSortType _) = Set.empty
 freeVars TermSortProp = Set.empty
 
-subst :: VariableName -> Term -> Term -> State.State Int Term
+type FreshState = State.State Int
+
+subst :: VariableName -> Term -> Term -> FreshState Term
 subst s e t@(TermVar n)
     | s == n = return e
     | otherwise = return t
+subst s e (TermApp e1 e2) = do
+    e1 <- subst s e e1
+    e2 <- subst s e e2
+    return $ TermApp e1 e2
 subst s e (TermApp e1 e2) = do
     e1 <- subst s e e1
     e2 <- subst s e e2
@@ -104,23 +110,50 @@ subst s e (TermApp e1 e2) = do
 --subst x y (TermAbs (Binder n Nothing) e)
 --    | n ==
 
+
+
+{-
+
+      TermVar VariableName
+    | TermApp Term Term
+    | TermAbs Binder Term
+--    | TermLet Binder Term Term
+    | TermPi Binder Term
+    | TermFix VariableName Binder OptionalTypeAnnot Term
+    -- The (Maybe Term) is the return clause.
+    | TermMatch Term InClause (Maybe Term) [MatchArm]
+    | TermAnnot Term Term
+    | TermSortType UniverseIndex
+    | TermSortProp
+
+-}
+
+fresh :: FreshState String
+fresh = do
+    i <- State.get
+    State.put (i + 1)
+    return $ "#" ++ show i
+
 data NormalizationStrategy = CBV | WHNF deriving (Show, Eq, Ord)
 
-normalize :: NormalizationStrategy -> ValCtx -> Term -> Term
-normalize _ vc (TermVar name) = fromJust $ Map.lookup name vc
+normalize :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
+normalize _ vc (TermVar name) = return $ fromJust $ Map.lookup name vc
 
-normalize ns vc (TermAnnot e ty) = (TermAnnot (n e) (n ty))
-    where n = normalize ns vc
+normalize ns vc (TermAnnot e ty) = do
+    e <- n e
+    ty <- n ty
+    return $ (TermAnnot e ty)
+        where n = normalize ns vc
 
 --normalize CBV vc (TermApp fn arg) = normalize CBV fn
 --normalize WHNF vc (TermApp fn arg) =
 
 -- Passed through.
-normalize _ _ t@(TermSortType _) = t
-normalize _ _ t@TermSortProp = t
+normalize _ _ t@(TermSortType _) = return $ t
+normalize _ _ t@TermSortProp = return $ t
 -- For some reason we don't normalize inside of products.
 -- I'm copying this behavior from Bauer's Spartan type theory.
-normalize _ _ t@(TermPi _ _) = t
+normalize _ _ t@(TermPi _ _) = return $ t
 
 infer :: ValCtx -> TypeCtx -> Term -> Term
 infer _ tc (TermVar name) = fromJust $ Map.lookup name tc
