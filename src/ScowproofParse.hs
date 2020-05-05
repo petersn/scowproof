@@ -29,20 +29,24 @@ data Expr =
     | ExprArrow Expr Expr
     | ExprFix VariableName [TypedName] OptionalExprAnnot Expr
     -- The three Maybes are: as, in, return
-    | ExprMatch Expr (Maybe Expr) (Maybe Expr) (Maybe Expr) [MatchArmExpr]
+    | ExprMatch Expr (Maybe VariableName) (Maybe Expr) (Maybe Expr) [MatchArmExpr]
     | ExprAnnot Expr Expr
     | ExprLit Literal
     deriving (Show, Eq, Ord)
 
 data InductiveConstructorExpr = InductiveConstructorExpr VariableName [TypedName] Expr deriving (Show, Eq, Ord)
 
+data Command =
+    CmdInfer Expr
+    | CmdCheck Expr Expr
+    | CmdEval Expr
+    deriving (Show, Eq, Ord)
+
 data Vernac =
     VernacDefinition VariableName [TypedName] OptionalExprAnnot Expr
     | VernacAxiom VariableName Expr
     | VernacInductive VariableName [TypedName] OptionalExprAnnot [InductiveConstructorExpr]
-    | VernacInfer Expr
-    | VernacCheck Expr Expr
-    | VernacEval Expr
+    | VernacCommand Command
     deriving (Show, Eq, Ord)
 
 languageDef = emptyDef {
@@ -116,7 +120,7 @@ parseExprAtom =
         parseMatch = do
             reserved "match"
             scrutinee <- parseExpr
-            asClause <- optionMaybe (reserved "as" >> parseExpr)
+            asClause <- optionMaybe (reserved "as" >> identifier)
             inClause <- optionMaybe (reserved "in" >> parseExpr)
             returnClause <- optionMaybe (reserved "return" >> parseExpr)
             symbol "{"
@@ -233,19 +237,19 @@ parseVernac =
             reserved "infer"
             expr <- parseExpr
             semi
-            return $ VernacInfer expr
+            return $ VernacCommand (CmdInfer expr)
         parseCheck = do
             reserved "check"
             expr1 <- parseExpr
             symbol ":"
             expr2 <- parseExpr
             semi
-            return $ VernacCheck expr1 expr2
+            return $ VernacCommand (CmdCheck expr1 expr2)
         parseEval = do
             reserved "eval"
             expr <- parseExpr
             semi
-            return $ VernacEval expr
+            return $ VernacCommand (CmdEval expr)
 
 parseProgramBlock :: Parser [Vernac]
 parseProgramBlock = do
