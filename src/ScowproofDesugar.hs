@@ -7,7 +7,7 @@ import Data.Maybe
 import qualified Data.Map as Map
 
 import ScowproofParse
-import ScowproofKernel
+import ScowproofTerms
 
 desugarTypedName :: TypedName -> Binder
 desugarTypedName (TypedName name optionalExprAnnot) = Binder name $ desugarExpr <$> optionalExprAnnot
@@ -97,8 +97,8 @@ desugarExpr (ExprLit (LitNat n)) = iterate wrapWithSucc (TermVar "nat::O") !! fr
     where wrapWithSucc t = (TermApp (TermVar "nat::S") t)
 
 data GlobalScope = GlobalScope {
-    globalTerms :: Map.Map ScowproofKernel.VariableName Term,
-    globalInductives :: Map.Map ScowproofKernel.VariableName Inductive,
+    globalTerms :: Map.Map VariableName Term,
+    globalInductives :: Map.Map VariableName Inductive,
     globalCommands :: [Command]
 } deriving (Show, Eq, Ord)
 
@@ -129,16 +129,16 @@ prettyTerm :: Int -> Term -> String
 prettyTerm d (TermVar "nat") = "ℕ"
 prettyTerm d (TermVar name) = name
 prettyTerm d (TermApp e1 e2) = "(" ++ prettyTerm d e1 ++ " " ++ prettyTerm d e2 ++ ")"
-prettyTerm d (TermAbs binder body) = "fun " ++ prettyBinder d binder ++ " => " ++ newLine (d + 1) ++ prettyTerm (d + 1) body
+prettyTerm d (TermAbs binder body) = "[fun " ++ prettyBinder d binder ++ " => " ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ "]"
 --prettyTerm d (TermLet binder e1 e2) = "let " ++ prettyBinder d binder ++ " = " ++ prettyTerm d e1 ++ " in " ++ prettyTerm d e2
 
-prettyTerm d (TermPi (Binder "_" (Just ty)) e) = prettyTerm d ty ++ " -> " ++ prettyTerm d e
+prettyTerm d (TermPi (Binder "_" (Just ty)) e) = prettyTerm d ty ++ " → " ++ prettyTerm d e
 prettyTerm d (TermPi binder e) = "∀ " ++ prettyBinder d binder ++ ", " ++ prettyTerm d e
 
 prettyTerm d (TermFix hypothesis binder Nothing body) =
-    "fix " ++ prettyBinder d binder ++ " { " ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ " }"
+    "fix " ++ hypothesis ++ " " ++ prettyBinder d binder ++ " { " ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ " }"
 prettyTerm d (TermFix hypothesis binder (Just ty) body) =
-    "fix " ++ prettyBinder d binder ++ " : " ++ prettyTerm d ty ++ " {" ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ newLine d ++ "}"
+    "fix " ++ hypothesis ++ " " ++ prettyBinder d binder ++ " : " ++ prettyTerm d ty ++ " {" ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ newLine d ++ "}"
 
 prettyTerm d (TermMatch scrutinee inClause returnClause matchArms) =
     "match " ++ prettyTerm d scrutinee ++ inText ++ returnText ++ " {" ++ newLine (d + 1) ++ prettiedArms ++ newLine d ++ "}"

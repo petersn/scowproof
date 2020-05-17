@@ -1,3 +1,4 @@
+{-# language BangPatterns #-}
 
 module ScowproofKernel where
 
@@ -5,36 +6,11 @@ import Data.Maybe
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Control.Monad.State as State
+import qualified System.IO.Unsafe
+import Debug.Trace
 
-type VariableName = String
-type OptionalTypeAnnot = Maybe Term
-type UniverseIndex = Integer
-type ValCtx = Map.Map VariableName Term
-type TypeCtx = Map.Map VariableName Term
-
-data Binder = Binder VariableName OptionalTypeAnnot deriving (Show, Eq, Ord)
-data MatchArm = MatchArm VariableName [Binder] Term deriving (Show, Eq, Ord)
-
-data InClause =
-      InPresent VariableName [VariableName]
-    | InAbsent
-    deriving (Show, Eq, Ord)
-
-data Term =
-      TermVar VariableName
-    | TermApp Term Term
-    | TermAbs Binder Term
---    | TermLet Binder Term Term
-    | TermPi Binder Term
-    | TermFix VariableName Binder OptionalTypeAnnot Term
-    -- The (Maybe Term) is the return clause.
-    | TermMatch Term InClause (Maybe Term) [MatchArm]
-    | TermAnnot Term Term
-    | TermSortType UniverseIndex
-    | TermSortProp
-    deriving (Show, Eq, Ord)
-
-data Inductive = Inductive deriving (Show, Eq, Ord)
+import ScowproofTerms
+import ScowproofDesugar
 
 annotUpdate :: OptionalTypeAnnot -> Set.Set VariableName -> Set.Set VariableName
 annotUpdate Nothing set = set
@@ -102,18 +78,247 @@ subst s e (TermApp e1 e2) = do
     e1 <- subst s e e1
     e2 <- subst s e e2
     return $ TermApp e1 e2
-subst s e (TermApp e1 e2) = do
-    e1 <- subst s e e1
-    e2 <- subst s e e2
-    return $ TermApp e1 e2
 
 --subst x y (TermAbs (Binder n Nothing) e)
 --    | n ==
 
+fresh :: String -> FreshState String
+fresh name = do
+    i <- State.get
+    State.put (i + 1)
+    return $ (fst $ span (/= '#') name) ++ "#" ++ show i
 
+rename :: VariableName -> VariableName -> Term -> Term
+rename old new t@(TermVar name)
+    | name == old = TermVar new
+    | otherwise = t
+rename old new (TermApp fn arg) = TermApp (r fn) (r arg)
+    where r = rename old new
+rename old new (TermAbs (Binder name optionalTy) body)
+    | old == name = TermAbs binder' body
+    | otherwise   = TermAbs binder' (r body)
+    where
+        r = rename old new
+        binder' = Binder name (r <$> optionalTy)
+-- Ugh, I don't like this duplication...
+rename old new (TermPi (Binder name optionalTy) body)
+    | old == name = TermPi binder' body
+    | otherwise   = TermPi binder' (r body)
+    where
+        r = rename old new
+        binder' = Binder name (r <$> optionalTy)
+
+-- There are many edge cases here.
+-- In our outer well-formedness checking we demand that the parameter not shadow the fix's name.
+-- So, the most pathological remaining cases are like:
+--   fix f (x : f) : f { f }
+--   fix f (x : x) : x { x }
+-- What happens if we try to rename x to y or f to y in the above?
+-- The answer is that we should get:
+--   fix f (x : f) : f { f }   (x to y) becomes   fix f (x : f) : f { f }
+--   fix f (x : x) : x { x }   (x to y) becomes   fix f (x : y) : x { x }
+--   fix f (x : f) : f { f }   (f to y) becomes   fix f (x : y) : y { f }
+--   fix f (x : x) : x { x }   (f to y) becomes   fix f (x : x) : x { x }
+-- The binding rules are as follows:
+--   fix 1 (2 : a) : b { c }
+-- Inside of a: [] -- neither 1 nor 2 is visible.
+-- Inside of b: [2] -- only 2 is visible.
+-- Inside of c: [1, 2] -- both 1 and 2 are visible, with 2 ta
+-- We therefore have to handle three cases: (old == 1), (old == 2), and otherwise.
+rename old new (TermFix recName (Binder recArgName optionalRecArgTy) optionalTy body)
+    -- The recName is bound inside of the body,
+    | old == recName    = TermFix recName binder' (r <$> optionalTy) body
+    | old == recArgName = TermFix recName binder' optionalTy body
+    | otherwise         = TermFix recName binder' (r <$> optionalTy) (r body)
+    where
+        r = rename old new
+        binder' = Binder recArgName (r <$> optionalRecArgTy)
+
+rename old new (TermMatch scrutinee inClause returnClause matchArms) =
+    TermMatch (r scrutinee) inClause returnClause (renameInArm <$> matchArms)
+    where
+        r = rename old new
+        renameInArm arm@(MatchArm constructorName binders body)
+            | old `elem` [name | Binder name _ <- binders] = arm
+            | otherwise = MatchArm constructorName binders (r body)
+
+rename old new (TermAnnot e ty) = TermAnnot (r e) (r ty)
+    where r = rename old new
+rename old new t@(TermSortType _) = t
+rename old new t@TermSortProp = t
+
+data NormalizationStrategy = CBV | WHNF deriving (Show, Eq, Ord)
+
+normalizeBinder :: NormalizationStrategy -> ValCtx -> Binder -> FreshState Binder
+normalizeBinder ns vc b@(Binder _ Nothing) = return b
+normalizeBinder ns vc (Binder name (Just ty)) = do
+    ty <- normalize ns vc ty
+    return $ Binder name (Just ty)
+
+normalizeOptionalTypeAnnot :: NormalizationStrategy -> ValCtx -> OptionalTypeAnnot -> FreshState OptionalTypeAnnot
+-- A type annotation is never in head position, and therefore WHNF normalization should do nothing.
+normalizeOptionalTypeAnnot WHNF _ = return
+normalizeOptionalTypeAnnot CBV vc = traverse $ normalize CBV vc
+
+deleteKeys :: (Ord k) => [k] -> Map.Map k a -> Map.Map k a
+deleteKeys keys m = foldr Map.delete m keys
+
+--etaExpandFix :: Term -> Term
+--etaExpandFix fix@(TermFix recName b@(Binder recArgName _) optionalTypeAnnot body) =
+--    TermAbs b (TermApp (TermAbs (Binder recName Nothing) body) fix)
+
+formLetIn :: Binder -> Term -> Term -> Term
+formLetIn binder x y = TermApp (TermAbs binder y) x
+
+normalize :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
+normalize ns vc t = normalize' ns vc (traceStop ("Normalizing (ctx=" ++ (show $ Map.keys vc) ++ ") " ++ ScowproofDesugar.prettyTerm 0 t) t)
+--normalize = normalize'
+
+normalize' :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
+--normalize' ns vc (Map.findWithDefault t name vc)
+normalize' ns vc t@(TermVar name) = case Map.lookup name vc of
+    Just r -> normalize' ns vc r
+    Nothing -> return t
+normalize' ns vc (TermApp fn arg) = do
+    fn <- normalize ns vc fn
+    normedArg <- argNorm ns
+    case fn of
+        TermAbs (Binder name _) body -> normalize ns (Map.insert name normedArg vc) body
+        TermFix recName argBinder@(Binder recArgName _) optionalTypeAnnot body ->
+            let inner = formLetIn argBinder normedArg body in
+            normalize ns vc (formLetIn (Binder recName Nothing) fn inner)
+            -- (TermApp (etaExpandFix fn) arg)
+        _ -> return $ TermApp fn normedArg
+    where
+        argNorm WHNF = return arg
+        argNorm CBV = normalize ns vc arg
+normalize' ns vc (TermAbs (Binder name ty) body) = do
+    newName <- fresh name
+    normedTy <- case ns of
+        WHNF -> return ty
+        CBV -> normalizeOptionalTypeAnnot ns vc ty
+    --let vc' = Map.insert name (TermVar newName) vc
+    --normedBody <- normalize ns vc' body
+    let normedBody = rename name newName body
+    return $ TermAbs (Binder newName normedTy) normedBody
 
 {-
+(
+    (fix f arg {body})
+    val
+)
+->
+(
+    let f = (fix f arg {body}) in
+    let arg = val in
+    body
+)
+->
+(
+    (fun f =>
+        (fun arg => body) val
+    )
+    (fix f arg {body})
+)
+-}
 
+-- For some reason Bauer doesn't normalize inside of products in Spartan type theory, but I do.
+normalize' WHNF vc t@(TermPi binder ty) = return t
+normalize' CBV vc (TermPi binder ty) = TermPi <$> normalizeBinder CBV vc binder <*> normalize CBV vc ty
+
+normalize' WHNF vc t@(TermFix recName binder optionalTy body) = do
+    newRecName <- fresh recName
+    return $ TermFix newRecName binder optionalTy (rename recName newRecName body)
+-- XXX: FIXME: This CBV is still wrong! I need to rename recName!
+normalize' CBV vc t@(TermFix recName binder optionalTy body) =
+    TermFix recName <$> normalizeBinder CBV vc binder <*> normalizeOptionalTypeAnnot CBV vc optionalTy <*> normalize CBV vc body
+--normalize' CBV vc t@(TermFix recName binder optionalTypeAnnot body) =
+--    TermFix recName <$> normalizeBinder CBV vc binder <*> normalizeOptionalTypeAnnot CBV vc optionalTypeAnnot <*> normalize CBV vc body
+
+normalize' ns vc t@(TermMatch scrutinee inClause returnClause matchArms) = do
+    scrutinee' <- normalize ns vc scrutinee
+    case [
+            (binders, applied) |
+            MatchArm constructorName binders body <- matchArms,
+            -- Should I maybe store my binders in pre-reversed order?
+            -- Also, how do I do this with a "let Just applied = ..." instead? That gives an irrefutable pattern issue.
+            Just applied <- [matchAppSpine constructorName (reverse binders) scrutinee' body]
+        ] of
+            -- Here the return value is still in head position, so we must keep normalizing, even in WHNF.
+            (binders, result) : _ -> normalize ns (armContext binders) result
+            -- Here the match arms won't be in head position, so we potentially stop normalizing them.
+            [] -> do
+                let vcReturn = deleteKeys (inVariables inClause) vc
+                returnClause' <- normalizeOptionalTypeAnnot ns vcReturn returnClause
+                matchArms' <- mapM (normalizeArm ns) matchArms
+                return $ TermMatch scrutinee' inClause returnClause' matchArms'
+                where
+                    inVariables (InPresent _ vars) = vars
+                    inVariables InAbsent = []
+                    normalizeArm WHNF arm = return arm
+                    normalizeArm CBV (MatchArm constructorName binders body) = do
+                        body' <- normalize ns (armContext binders) body
+                        return $ MatchArm constructorName binders body'
+    where
+        --matchAppSpine' a b c d =
+        --    trace ("(Matching " ++ show c ++ " with " ++ show a ++ " " ++ show b ++ " in ctx: " ++ show (Map.keys vc) ++ ")") (matchAppSpine a b c d)
+        matchAppSpine :: VariableName -> [Binder] -> Term -> Term -> Maybe Term
+        matchAppSpine constructorName [] (TermVar constructorName2) body
+            | (constructorName == constructorName2) = Just body
+            | otherwise = Nothing
+        matchAppSpine constructorName (binder:binders) (TermApp fn arg) body = do
+            next <- matchAppSpine constructorName binders fn body
+            return $ TermApp (TermAbs binder next) arg
+        -- Be careful here; I maybe want to error out on some ill-formed cases here.
+        matchAppSpine _ _ _ _ = Nothing
+        armContext binders = deleteKeys [name | Binder name _ <- binders] vc
+
+normalize' WHNF vc (TermAnnot e ty) = TermAnnot <$> normalize WHNF vc e <*> return ty
+normalize' CBV  vc (TermAnnot e ty) = TermAnnot <$> normalize CBV vc e <*> normalize CBV vc ty
+
+{-
+nat::S [x, y, z] => body
+
+(App 
+    (App
+        (App
+            (Var nat::S)
+            a
+        )
+        b
+    )
+    c
+)
+
+let z = c in
+let y = b in
+let x = a in
+    (<- normalize ns vc body)
+-}
+
+-- Passed through.
+normalize' _ _ t@(TermSortType _) = return t
+normalize' _ _ t@TermSortProp = return t
+
+traceVal msg x = traceStop (msg ++ ": " ++ show x) x
+
+traceStop :: String -> a -> a
+traceStop msg x = System.IO.Unsafe.unsafePerformIO $ do
+    seq (length msg) (return ())
+    putStrLn msg
+    _ <- getChar
+    return x
+
+normalizeOnce :: NormalizationStrategy -> ValCtx -> Term -> Term
+normalizeOnce ns vc t = fst $ State.runState (normalize ns vc t) 0
+
+infer :: ValCtx -> TypeCtx -> Term -> Term
+infer _ tc (TermVar name) = fromJust $ Map.lookup name tc
+
+check :: ValCtx -> TypeCtx -> Term -> Term -> Bool
+check ctx _ = undefined
+
+{-
       TermVar VariableName
     | TermApp Term Term
     | TermAbs Binder Term
@@ -125,38 +330,4 @@ subst s e (TermApp e1 e2) = do
     | TermAnnot Term Term
     | TermSortType UniverseIndex
     | TermSortProp
-
 -}
-
-fresh :: FreshState String
-fresh = do
-    i <- State.get
-    State.put (i + 1)
-    return $ "#" ++ show i
-
-data NormalizationStrategy = CBV | WHNF deriving (Show, Eq, Ord)
-
-normalize :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
-normalize _ vc (TermVar name) = return $ fromJust $ Map.lookup name vc
-
-normalize ns vc (TermAnnot e ty) = do
-    e <- n e
-    ty <- n ty
-    return $ (TermAnnot e ty)
-        where n = normalize ns vc
-
---normalize CBV vc (TermApp fn arg) = normalize CBV fn
---normalize WHNF vc (TermApp fn arg) =
-
--- Passed through.
-normalize _ _ t@(TermSortType _) = return $ t
-normalize _ _ t@TermSortProp = return $ t
--- For some reason we don't normalize inside of products.
--- I'm copying this behavior from Bauer's Spartan type theory.
-normalize _ _ t@(TermPi _ _) = return $ t
-
-infer :: ValCtx -> TypeCtx -> Term -> Term
-infer _ tc (TermVar name) = fromJust $ Map.lookup name tc
-
-check :: ValCtx -> TypeCtx -> Term -> Term -> Bool
-check ctx _ = undefined

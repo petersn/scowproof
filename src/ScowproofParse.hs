@@ -9,8 +9,8 @@ import Text.ParserCombinators.Parsec
 import Text.ParserCombinators.Parsec.Expr
 import Text.ParserCombinators.Parsec.Language
 import qualified Text.ParserCombinators.Parsec.Token as Token
+import ScowproofTerms (VariableName)
 
-type VariableName = String
 type OptionalExprAnnot = Maybe Expr
 
 data TypedName = TypedName VariableName OptionalExprAnnot deriving (Show, Eq, Ord)

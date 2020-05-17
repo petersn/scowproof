@@ -15,7 +15,7 @@ runCommand globalScope (ScowproofParse.CmdEval expr) = do
     where
         term = ScowproofDesugar.desugarExpr expr
         valCtx = ScowproofDesugar.globalTerms globalScope
-        resultTerm = ScowproofKernel.normalize ScowproofKernel.CBV valCtx term
+        resultTerm = ScowproofKernel.normalizeOnce ScowproofKernel.WHNF valCtx term
 
 main :: IO ()
 main = do

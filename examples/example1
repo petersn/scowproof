@@ -4,16 +4,57 @@ inductive nat : Set {
     S : nat -> nat;
 }
 
+let plus =
+    fix plus (x : nat) : nat {
+        fun (y : nat) =>
+            match x {
+                nat::O => y;
+                nat::S x' => plus x' (nat::S y);
+            }
+    };
+
+eval plus 0 0;
+
+/*
 fixpoint plus (x y : nat) : nat {
     match x {
         nat::O => y;
         nat::S x' => plus x' (nat::S y);
     }
 }
+*/
+
+/*
+let pred (x : nat) =
+    match x {
+        nat::O => 0;
+        nat::S x' => x';
+    };
+
+fixpoint zero (x : nat) : nat {
+    match x {
+        nat::O => 0;
+        nat::S x' => zero x';
+    }
+}
+*/
+
+//eval pred 2;
+
+//eval zero 1;
+
+//eval ((fun x => x) (fun y => y y));
 
 // Evaluate 2 + 2 into a normal form.
-eval plus 2 2;
+/*
+eval (
+    let x = 0 in match x {
+        nat::O => x;
+    }
+);
+*/
 
+/*
 // The type of the induction principle on naturals.
 let nat_ind_type =
     forall (P : nat -> Prop),
@@ -36,3 +77,4 @@ let nat_ind =
         };
 
 check nat_ind : nat_ind_type;
+*/
