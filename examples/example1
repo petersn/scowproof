@@ -4,6 +4,15 @@ inductive nat : Set {
     S : nat -> nat;
 }
 
+S : forall (_ : nat), nat.
+
+fixpoint zero (x : nat) : nat {
+    match x {
+        nat::O => 0;
+        nat::S x' => zero x';
+    }
+}
+
 let plus =
     fix plus (x : nat) : nat {
         fun (y : nat) =>
@@ -13,7 +22,17 @@ let plus =
             }
     };
 
-eval plus 0 0;
+let plusUnfold (x y : nat) : nat =
+    match x {
+        nat::O => y;
+        nat::S x' => plus x' (nat::S y);
+    };
+
+//eval zero 2;
+
+eval plus 2 2;
+
+//eval plusUnfold 0;
 
 /*
 fixpoint plus (x y : nat) : nat {

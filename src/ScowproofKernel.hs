@@ -70,42 +70,30 @@ freeVars TermSortProp = Set.empty
 
 type FreshState = State.State Int
 
-subst :: VariableName -> Term -> Term -> FreshState Term
-subst s e t@(TermVar n)
-    | s == n = return e
-    | otherwise = return t
-subst s e (TermApp e1 e2) = do
-    e1 <- subst s e e1
-    e2 <- subst s e e2
-    return $ TermApp e1 e2
-
---subst x y (TermAbs (Binder n Nothing) e)
---    | n ==
-
 fresh :: String -> FreshState String
 fresh name = do
     i <- State.get
     State.put (i + 1)
     return $ (fst $ span (/= '#') name) ++ "#" ++ show i
 
-rename :: VariableName -> VariableName -> Term -> Term
-rename old new t@(TermVar name)
-    | name == old = TermVar new
+subst :: VariableName -> Term -> Term -> Term
+subst old new t@(TermVar name)
+    | name == old = new
     | otherwise = t
-rename old new (TermApp fn arg) = TermApp (r fn) (r arg)
-    where r = rename old new
-rename old new (TermAbs (Binder name optionalTy) body)
+subst old new (TermApp fn arg) = TermApp (r fn) (r arg)
+    where r = subst old new
+subst old new (TermAbs (Binder name optionalTy) body)
     | old == name = TermAbs binder' body
     | otherwise   = TermAbs binder' (r body)
     where
-        r = rename old new
+        r = subst old new
         binder' = Binder name (r <$> optionalTy)
 -- Ugh, I don't like this duplication...
-rename old new (TermPi (Binder name optionalTy) body)
+subst old new (TermPi (Binder name optionalTy) body)
     | old == name = TermPi binder' body
     | otherwise   = TermPi binder' (r body)
     where
-        r = rename old new
+        r = subst old new
         binder' = Binder name (r <$> optionalTy)
 
 -- There are many edge cases here.
@@ -113,7 +101,7 @@ rename old new (TermPi (Binder name optionalTy) body)
 -- So, the most pathological remaining cases are like:
 --   fix f (x : f) : f { f }
 --   fix f (x : x) : x { x }
--- What happens if we try to rename x to y or f to y in the above?
+-- What happens if we try to subst x to y or f to y in the above?
 -- The answer is that we should get:
 --   fix f (x : f) : f { f }   (x to y) becomes   fix f (x : f) : f { f }
 --   fix f (x : x) : x { x }   (x to y) becomes   fix f (x : y) : x { x }
@@ -125,27 +113,27 @@ rename old new (TermPi (Binder name optionalTy) body)
 -- Inside of b: [2] -- only 2 is visible.
 -- Inside of c: [1, 2] -- both 1 and 2 are visible, with 2 ta
 -- We therefore have to handle three cases: (old == 1), (old == 2), and otherwise.
-rename old new (TermFix recName (Binder recArgName optionalRecArgTy) optionalTy body)
+subst old new (TermFix recName (Binder recArgName optionalRecArgTy) optionalTy body)
     -- The recName is bound inside of the body,
     | old == recName    = TermFix recName binder' (r <$> optionalTy) body
     | old == recArgName = TermFix recName binder' optionalTy body
     | otherwise         = TermFix recName binder' (r <$> optionalTy) (r body)
     where
-        r = rename old new
+        r = subst old new
         binder' = Binder recArgName (r <$> optionalRecArgTy)
 
-rename old new (TermMatch scrutinee inClause returnClause matchArms) =
-    TermMatch (r scrutinee) inClause returnClause (renameInArm <$> matchArms)
+subst old new (TermMatch scrutinee inClause returnClause matchArms) =
+    TermMatch (r scrutinee) inClause returnClause (substInArm <$> matchArms)
     where
-        r = rename old new
-        renameInArm arm@(MatchArm constructorName binders body)
+        r = subst old new
+        substInArm arm@(MatchArm constructorName binders body)
             | old `elem` [name | Binder name _ <- binders] = arm
             | otherwise = MatchArm constructorName binders (r body)
 
-rename old new (TermAnnot e ty) = TermAnnot (r e) (r ty)
-    where r = rename old new
-rename old new t@(TermSortType _) = t
-rename old new t@TermSortProp = t
+subst old new (TermAnnot e ty) = TermAnnot (r e) (r ty)
+    where r = subst old new
+subst old new t@(TermSortType _) = t
+subst old new t@TermSortProp = t
 
 data NormalizationStrategy = CBV | WHNF deriving (Show, Eq, Ord)
 
@@ -171,8 +159,8 @@ formLetIn :: Binder -> Term -> Term -> Term
 formLetIn binder x y = TermApp (TermAbs binder y) x
 
 normalize :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
-normalize ns vc t = normalize' ns vc (traceStop ("Normalizing (ctx=" ++ (show $ Map.keys vc) ++ ") " ++ ScowproofDesugar.prettyTerm 0 t) t)
---normalize = normalize'
+--normalize ns vc t = normalize' ns vc (traceStop ("Normalizing (ctx=" ++ (show $ Map.keys vc) ++ ") " ++ ScowproofDesugar.prettyTerm 0 t) t)
+normalize = normalize'
 
 normalize' :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
 --normalize' ns vc (Map.findWithDefault t name vc)
@@ -183,12 +171,29 @@ normalize' ns vc (TermApp fn arg) = do
     fn <- normalize ns vc fn
     normedArg <- argNorm ns
     case fn of
-        TermAbs (Binder name _) body -> normalize ns (Map.insert name normedArg vc) body
+        TermAbs (Binder name _) body -> normalize ns vc (subst name normedArg body)
         TermFix recName argBinder@(Binder recArgName _) optionalTypeAnnot body ->
-            let inner = formLetIn argBinder normedArg body in
-            normalize ns vc (formLetIn (Binder recName Nothing) fn inner)
+            -- I think doing these substitutions non-simultaneously is okay due to recArgName being fresh.
+            normalize ns vc (subst recArgName normedArg (subst recName fn body))
+            where
+                -- These inserts should never conflict, if the term passed our well-formedness check.
+                innerVc = Map.insert recArgName normedArg (Map.insert recName fn vc)
+            --let inner = formLetIn argBinder normedArg body in
+            --normalize ns vc (formLetIn (Binder recName Nothing) fn inner)
             -- (TermApp (etaExpandFix fn) arg)
         _ -> return $ TermApp fn normedArg
+        {-
+        TermAbs (Binder name _) body -> normalize ns (Map.insert name normedArg vc) body
+        TermFix recName argBinder@(Binder recArgName _) optionalTypeAnnot body ->
+            normalize ns innerVc body
+            where
+                -- These inserts should never conflict, if the term passed our well-formedness check.
+                innerVc = Map.insert recArgName normedArg (Map.insert recName fn vc)
+            --let inner = formLetIn argBinder normedArg body in
+            --normalize ns vc (formLetIn (Binder recName Nothing) fn inner)
+            -- (TermApp (etaExpandFix fn) arg)
+        _ -> return $ TermApp fn normedArg
+        -}
     where
         argNorm WHNF = return arg
         argNorm CBV = normalize ns vc arg
@@ -199,7 +204,7 @@ normalize' ns vc (TermAbs (Binder name ty) body) = do
         CBV -> normalizeOptionalTypeAnnot ns vc ty
     --let vc' = Map.insert name (TermVar newName) vc
     --normedBody <- normalize ns vc' body
-    let normedBody = rename name newName body
+    let normedBody = subst name (TermVar newName) body
     return $ TermAbs (Binder newName normedTy) normedBody
 
 {-
@@ -228,8 +233,8 @@ normalize' CBV vc (TermPi binder ty) = TermPi <$> normalizeBinder CBV vc binder 
 
 normalize' WHNF vc t@(TermFix recName binder optionalTy body) = do
     newRecName <- fresh recName
-    return $ TermFix newRecName binder optionalTy (rename recName newRecName body)
--- XXX: FIXME: This CBV is still wrong! I need to rename recName!
+    return $ TermFix newRecName binder optionalTy (subst recName (TermVar newRecName) body)
+-- XXX: FIXME: This CBV is still wrong! I need to subst recName!
 normalize' CBV vc t@(TermFix recName binder optionalTy body) =
     TermFix recName <$> normalizeBinder CBV vc binder <*> normalizeOptionalTypeAnnot CBV vc optionalTy <*> normalize CBV vc body
 --normalize' CBV vc t@(TermFix recName binder optionalTypeAnnot body) =
