@@ -40,6 +40,7 @@ data Command =
       CmdInfer Expr
     | CmdCheck Expr Expr
     | CmdEval Expr
+    | CmdAlphaCanon Expr
     deriving (Show, Eq, Ord)
 
 data Vernac =
@@ -56,7 +57,7 @@ languageDef = emptyDef {
 	Token.identStart      = letter,
 	Token.identLetter     = alphaNum <|> oneOf "_'",
 	Token.reservedNames   = [
-		"let", "fixpoint", "axiom", "inductive", "infer", "check", "eval",
+		"let", "fixpoint", "axiom", "inductive", "infer", "check", "eval", "alphacanon",
         "forall", "fun", "fix", "match", "as", "in", "return"
 	],
 	Token.reservedOpNames = []
@@ -197,6 +198,7 @@ parseVernac =
     <|> parseInfer
     <|> parseCheck
     <|> parseEval
+    <|> parseAlphaCanon
     where
         parseDefinition = do
             reserved "let"
@@ -250,6 +252,11 @@ parseVernac =
             expr <- parseExpr
             semi
             return $ VernacCommand (CmdEval expr)
+        parseAlphaCanon = do
+            reserved "alphacanon"
+            expr <- parseExpr
+            semi
+            return $ VernacCommand (CmdAlphaCanon expr)
 
 parseProgramBlock :: Parser [Vernac]
 parseProgramBlock = do

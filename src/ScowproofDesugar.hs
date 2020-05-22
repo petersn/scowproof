@@ -119,33 +119,36 @@ makeGlobalScope vernacs = GlobalScope {
 }
 
 newLine :: Int -> String
-newLine d = "\n" ++ replicate (2 * d) ' '
+newLine d = "\n" ++ replicate d ' '
 
 prettyBinder :: Int -> Binder -> String
 prettyBinder d (Binder name Nothing) = name
 prettyBinder d (Binder name (Just ty)) = "(" ++ name ++ " : " ++ prettyTerm d ty ++ ")"
 
+-- Indentation per level.
+ipl = 2
+
 prettyTerm :: Int -> Term -> String
 prettyTerm d (TermVar "nat") = "ℕ"
 prettyTerm d (TermVar name) = name
 prettyTerm d (TermApp e1 e2) = "(" ++ prettyTerm d e1 ++ " " ++ prettyTerm d e2 ++ ")"
-prettyTerm d (TermAbs binder body) = "[fun " ++ prettyBinder d binder ++ " => " ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ "]"
+prettyTerm d (TermAbs binder body) = "[fun " ++ prettyBinder d binder ++ " => " ++ newLine (d + ipl) ++ prettyTerm (d + ipl) body ++ "]"
 --prettyTerm d (TermLet binder e1 e2) = "let " ++ prettyBinder d binder ++ " = " ++ prettyTerm d e1 ++ " in " ++ prettyTerm d e2
 
 prettyTerm d (TermPi (Binder "_" (Just ty)) e) = prettyTerm d ty ++ " → " ++ prettyTerm d e
 prettyTerm d (TermPi binder e) = "∀ " ++ prettyBinder d binder ++ ", " ++ prettyTerm d e
 
 prettyTerm d (TermFix hypothesis binder Nothing body) =
-    "fix " ++ hypothesis ++ " " ++ prettyBinder d binder ++ " { " ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ " }"
+    "fix " ++ hypothesis ++ " " ++ prettyBinder d binder ++ " { " ++ newLine (d + ipl) ++ prettyTerm (d + ipl) body ++ " }"
 prettyTerm d (TermFix hypothesis binder (Just ty) body) =
-    "fix " ++ hypothesis ++ " " ++ prettyBinder d binder ++ " : " ++ prettyTerm d ty ++ " {" ++ newLine (d + 1) ++ prettyTerm (d + 1) body ++ newLine d ++ "}"
+    "fix " ++ hypothesis ++ " " ++ prettyBinder d binder ++ " : " ++ prettyTerm d ty ++ " {" ++ newLine (d + ipl) ++ prettyTerm (d + ipl) body ++ newLine d ++ "}"
 
 prettyTerm d (TermMatch scrutinee inClause returnClause matchArms) =
-    "match " ++ prettyTerm d scrutinee ++ inText ++ returnText ++ " {" ++ newLine (d + 1) ++ prettiedArms ++ newLine d ++ "}"
+    "match " ++ prettyTerm d scrutinee ++ inText ++ returnText ++ " {" ++ newLine (d + ipl) ++ prettiedArms ++ newLine d ++ "}"
     where
-        prettiedArms = intercalate (";" ++ newLine (d + 1)) $ prettyArm <$> matchArms
+        prettiedArms = intercalate (newLine (d + ipl)) $ map (++ ";") $ prettyArm <$> matchArms
         prettyArm (MatchArm constructorName arguments result) =
-            constructorName ++ (prettyBinder (d + 1) <$> arguments >>= (" " ++)) ++ " => " ++ prettyTerm d result
+            constructorName ++ (prettyBinder (d + ipl) <$> arguments >>= (" " ++)) ++ " => " ++ prettyTerm (d + ipl) result
         inText
             | InPresent constructorName arityNames <- inClause =
                 " in " ++ intercalate " " (constructorName : arityNames)

@@ -1,8 +1,10 @@
-{-# language BangPatterns #-}
+{-# language ImplicitParams #-}
 
 module ScowproofKernel where
 
 import Data.Maybe
+import Control.Monad.Except
+import qualified Data.List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Control.Monad.State as State
@@ -11,6 +13,8 @@ import Debug.Trace
 
 import ScowproofTerms
 import ScowproofDesugar
+
+type ExceptStr = Except String
 
 annotUpdate :: OptionalTypeAnnot -> Set.Set VariableName -> Set.Set VariableName
 annotUpdate Nothing set = set
@@ -24,7 +28,7 @@ matchArmFreeVars (MatchArm constructorName binders result) =
 
 freeVars :: Term -> Set.Set VariableName
 freeVars (TermVar name) = Set.singleton name
-freeVars (TermApp e1 e2) = freeVars e1 `Set.union` freeVars e2
+freeVars (TermApp fn arg) = freeVars fn `Set.union` freeVars arg
 -- Note that in (fun (x : x) => x) we actually *do* have x free in the type.
 -- Thus, in the following case we union in (freeVars ty) outside of the deletion.
 freeVars (TermAbs (Binder argName typeAnnot) e) = annotUpdate typeAnnot (Set.delete argName $ freeVars e)
@@ -58,15 +62,90 @@ freeVars (TermMatch scrutinee inClause returnClause matchArms) =
         (returnClauseVars `Set.difference` inClauseVars)
     ) (matchArmFreeVars <$> matchArms)
     where
-        returnClauseVars
-            | Just returnExpr <- returnClause = freeVars returnExpr
-            | otherwise = Set.empty
-        inClauseVars
-            | InPresent _ names <- inClause = Set.fromList names
-            | otherwise = Set.empty
+        returnClauseVars = case returnClause of
+            Just returnExpr -> freeVars returnExpr
+            Nothing -> Set.empty
+        inClauseVars = case inClause of
+            InPresent _ names -> Set.fromList names
+            InAbsent -> Set.empty
 freeVars (TermAnnot e ty) = freeVars e `Set.union` freeVars ty
 freeVars (TermSortType _) = Set.empty
 freeVars TermSortProp = Set.empty
+
+alphaAssign :: (?renamings :: Map.Map VariableName VariableName) => VariableName -> VariableName
+alphaAssign oldName = Map.findWithDefault oldName oldName ?renamings
+
+indexToName :: Int -> String
+indexToName nextIndex = "@" ++ show nextIndex
+
+alphaCanonBinder :: (?nextIndex :: Int, ?renamings :: Map.Map VariableName VariableName) => Binder -> Binder
+alphaCanonBinder (Binder name optionalTy) = Binder (indexToName ?nextIndex) (alphaCanonicalizeInner <$> optionalTy)
+
+alphaCanonUnderBinder :: (?nextIndex :: Int, ?renamings :: Map.Map VariableName VariableName) => Binder -> Term -> Term
+alphaCanonUnderBinder (Binder name optionalTy) t =
+    let ?nextIndex = ?nextIndex + 1
+        ?renamings = (Map.insert name (indexToName ?nextIndex) ?renamings) in alphaCanonicalizeInner t
+
+alphaCanonUnderNameList :: (?nextIndex :: Int, ?renamings :: Map.Map VariableName VariableName) => [VariableName] -> Term -> ([VariableName], Term)
+alphaCanonUnderNameList names t = (names', t')
+    where
+        lastIndex = ?nextIndex + length names
+        names' = indexToName <$> [?nextIndex .. lastIndex - 1]
+        t' = let
+                ?nextIndex = lastIndex
+                ?renamings = Data.List.foldl' (\m (name, name') -> Map.insert name name' m) ?renamings (zip names names')
+            in alphaCanonicalizeInner t
+
+alphaCanonicalizeInner :: (?nextIndex :: Int, ?renamings :: Map.Map VariableName VariableName) => Term -> Term
+alphaCanonicalizeInner (TermVar name) = TermVar (alphaAssign name)
+alphaCanonicalizeInner (TermApp fn arg) = TermApp (alphaCanonicalizeInner fn) (alphaCanonicalizeInner arg)
+alphaCanonicalizeInner (TermAbs binder body) = TermAbs (alphaCanonBinder binder) (alphaCanonUnderBinder binder body)
+alphaCanonicalizeInner (TermPi binder body)  = TermPi  (alphaCanonBinder binder) (alphaCanonUnderBinder binder body)
+alphaCanonicalizeInner (TermFix hypName binder@(Binder argName argAnnot) returnAnnot body) = TermFix hypName' binder' returnAnnot' body'
+    where
+        hypName' = indexToName ?nextIndex -- alphaAssign hypName
+        -- Canonicalize the binder's type ascription under no binders.
+        binder' = Binder (indexToName (?nextIndex + 1)) (alphaCanonicalizeInner <$> argAnnot)
+        -- Canonicalize the return annotation under just the binder.
+        returnAnnot' = (let ?nextIndex = ?nextIndex + 1 in alphaCanonUnderBinder binder <$> returnAnnot)
+        --returnAnnot' = alphaCanonUnderBinder binder <$> returnAnnot
+        -- We don't have to worry about the insertion order here, because well-formedness checking guarantees that the names are distinct.
+        argName' = case binder' of Binder x _ -> x
+        innerRenamings = Map.insert hypName hypName' $ Map.insert argName argName' ?renamings
+        -- Canonicalize the body under both hypName and the binder.
+        body' =
+            let ?nextIndex = ?nextIndex + 2
+                ?renamings = innerRenamings in alphaCanonicalizeInner body
+alphaCanonicalizeInner (TermMatch scrutinee inClause returnClause matchArms) = TermMatch scrutinee' inClause' returnClause' matchArms'
+    where
+        scrutinee' = alphaCanonicalizeInner scrutinee
+        (inClause', returnClauseRenamings) = case inClause of
+            InPresent constructorName vars -> let
+                    vars' = indexToName <$> [?nextIndex .. ?nextIndex + length vars]
+                in
+                    (
+                        InPresent constructorName $ vars',
+                        Map.fromList (zip vars vars') `Map.union` ?renamings
+                    )
+            InAbsent -> (InAbsent, ?renamings)
+        returnClause' = let ?renamings = returnClauseRenamings in alphaCanonicalizeInner <$> returnClause
+        -- We have to sort by constructor name here to avoid being sensitive to that.
+        matchArms' = Data.List.sortOn (\(MatchArm constructorName _ _) -> constructorName) [
+                let (names, body') = alphaCanonUnderNameList [name | Binder name _ <- binders] body in
+                MatchArm constructorName [Binder name Nothing | name <- names] body' |
+                MatchArm constructorName binders body <- matchArms
+            ]
+alphaCanonicalizeInner (TermAnnot e ty) = TermAnnot (alphaCanonicalizeInner e) (alphaCanonicalizeInner ty)
+alphaCanonicalizeInner e@(TermSortType _) = e
+alphaCanonicalizeInner e@TermSortProp = e
+
+alphaCanonicalize :: ValCtx -> Term -> Term
+alphaCanonicalize vc t = let
+        ?nextIndex = 0
+        ?renamings = Map.fromList [(name, name) | (name, _) <- Map.toList vc]
+    in alphaCanonicalizeInner t
+--alphaCanonicalize vc x = fst $ State.runState (alphaCanonicalizeInner x) startingMapping
+--    where startingMapping = Map.fromList [(name, name) | (name, _) <- Map.toList vc]
 
 type FreshState = State.State Int
 
@@ -284,7 +363,7 @@ normalize' CBV  vc (TermAnnot e ty) = TermAnnot <$> normalize CBV vc e <*> norma
 {-
 nat::S [x, y, z] => body
 
-(App 
+(App
     (App
         (App
             (Var nat::S)
@@ -317,11 +396,56 @@ traceStop msg x = System.IO.Unsafe.unsafePerformIO $ do
 normalizeOnce :: NormalizationStrategy -> ValCtx -> Term -> Term
 normalizeOnce ns vc t = fst $ State.runState (normalize ns vc t) 0
 
-infer :: ValCtx -> TypeCtx -> Term -> Term
-infer _ tc (TermVar name) = fromJust $ Map.lookup name tc
+coerceToProduct = id
 
-check :: ValCtx -> TypeCtx -> Term -> Term -> Bool
-check ctx _ = undefined
+isSort :: Term -> Bool
+isSort (TermSortType _) = True
+isSort TermSortProp = True
+isSort _ = False
+
+infer :: ValCtx -> TypeCtx -> Term -> ExceptStr Term
+infer vc tc (TermVar name) = case (Map.lookup name vc, Map.lookup name tc) of
+    (_, Just ty) -> return ty
+    (Just t, _) -> infer vc tc t
+    _ -> throwError $ "No type or definition for variable: " ++ name
+infer vc tc (TermApp fn arg) = do
+    fnType <- coerceToProduct <$> infer vc tc fn
+    (Binder argName optionalArgTy, fnResultTy) <- case fnType of
+        TermPi binder body -> return (binder, body)
+        _ -> throwError "Function types must be products"
+    argTy <- case optionalArgTy of
+        Just ty -> return ty
+        _ -> throwError "Function types in applications must infer with concrete argument types"
+    argTypeCorrect <- check vc tc arg argTy
+    when (not argTypeCorrect) (throwError "Application ill-typed")
+    return $ subst argName arg fnResultTy
+infer vc tc (TermAbs (Binder argName (Just argTy)) body) = do
+    argSort <- infer vc tc argTy
+    when (not (isSort argSort)) (throwError "Abstraction argument types must live in a sort")
+    resultTy <- infer vc (Map.insert argName argTy tc) body
+    return $ TermPi (Binder argName (Just argTy)) resultTy
+infer vc tc (TermAbs _ _) = throwError "Abstractions must have an argument type"
+infer vc tc (TermPi (Binder argName (Just argTy)) body) = do
+    argSort <- infer vc tc argTy
+    when (not (isSort argSort)) (throwError "Product argument types must live in a sort")
+    resultSort <- infer vc (Map.insert argName argTy tc) body
+    when (not (isSort resultSort)) (throwError "Product result types must live in a sort")
+    return $ resultSort
+infer vc tc (TermPi _ _) = throwError "Products must have an argument type"
+infer _ _ (TermSortType universeIndex) = return $ TermSortType (universeIndex + 1)
+-- Does this make sense?
+infer _ _ TermSortProp = return $ TermSortType 0
+
+-- Do I need the TypeCtx? Like, can I alpha canonicalize something that only has a typing?
+compareTerms :: ValCtx -> Term -> Term -> Bool
+compareTerms vc a b = normed a == normed b
+    where normed t = alphaCanonicalize vc $ normalizeOnce CBV vc t
+
+check :: ValCtx -> TypeCtx -> Term -> Term -> ExceptStr Bool
+--check ctx _ = undefined
+check vc tc e ty = do
+    inferredTy <- infer vc tc e
+    return $ compareTerms vc ty inferredTy
 
 {-
       TermVar VariableName

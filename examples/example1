@@ -4,8 +4,6 @@ inductive nat : Set {
     S : nat -> nat;
 }
 
-S : forall (_ : nat), nat.
-
 fixpoint zero (x : nat) : nat {
     match x {
         nat::O => 0;
@@ -31,6 +29,18 @@ let plusUnfold (x y : nat) : nat =
 //eval zero 2;
 
 eval plus 2 2;
+
+infer Prop;
+
+alphacanon match (fun x => x) {
+    nat::S x => fix x (y : x) : x { fun z => x y };
+    nat::O => x;
+};
+
+alphacanon match (fun x => x) {
+    nat::S x => fix f (x : x) : x { fun z => x y f };
+    nat::O => x;
+};
 
 //eval plusUnfold 0;
 

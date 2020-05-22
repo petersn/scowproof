@@ -1,21 +1,37 @@
 
 import qualified Data.Map as Map
 import qualified System.Environment
+import qualified Control.Monad.Except
 
 import qualified ScowproofParse
 import qualified ScowproofKernel
 import qualified ScowproofDesugar
 
 runCommand :: ScowproofDesugar.GlobalScope -> ScowproofParse.Command -> IO ()
-runCommand globalScope (ScowproofParse.CmdInfer expr) = putStrLn "Infer not implemented."
+runCommand globalScope (ScowproofParse.CmdInfer expr) = do
+    putStrLn $ "Infer: " ++ ScowproofDesugar.prettyTerm 7 term
+    case errOrResultTerm of
+        Left msg -> putStrLn $ "Error: " ++ msg
+        Right resultTerm -> putStrLn $ "=      " ++ ScowproofDesugar.prettyTerm 7 resultTerm
+    where
+        term = ScowproofDesugar.desugarExpr expr
+        valCtx = ScowproofDesugar.globalTerms globalScope
+        errOrResultTerm = Control.Monad.Except.runExcept $ ScowproofKernel.infer valCtx Map.empty term
 runCommand globalScope (ScowproofParse.CmdCheck termExpr typeExpr) = putStrLn "Check not implemented"
 runCommand globalScope (ScowproofParse.CmdEval expr) = do
-    putStrLn $ "Eval: " ++ ScowproofDesugar.prettyTerm 3 term
-    putStrLn $ "=     " ++ ScowproofDesugar.prettyTerm 3 resultTerm
+    putStrLn $ "Eval: " ++ ScowproofDesugar.prettyTerm 6 term
+    putStrLn $ "=     " ++ ScowproofDesugar.prettyTerm 6 resultTerm
     where
         term = ScowproofDesugar.desugarExpr expr
         valCtx = ScowproofDesugar.globalTerms globalScope
         resultTerm = ScowproofKernel.normalizeOnce ScowproofKernel.WHNF valCtx term
+runCommand globalScope (ScowproofParse.CmdAlphaCanon expr) = do
+    putStrLn $ "Alpha canonicalize:\n  " ++ ScowproofDesugar.prettyTerm 2 term
+    putStrLn $ "= " ++ ScowproofDesugar.prettyTerm 2 resultTerm
+    where
+        term = ScowproofDesugar.desugarExpr expr
+        valCtx = ScowproofDesugar.globalTerms globalScope
+        resultTerm = ScowproofKernel.alphaCanonicalize valCtx term
 
 main :: IO ()
 main = do
