@@ -23,8 +23,7 @@ annotUpdate (Just ty) set = set `Set.union` freeVars ty
 -- Because the constructorName is guaranteed (during inference/normalization) to
 -- always be a reference to a global inductive constructor, we omit it.
 matchArmFreeVars :: MatchArm -> Set.Set VariableName
-matchArmFreeVars (MatchArm constructorName binders result) =
-    freeVars result `Set.difference` Set.fromList [name | Binder name _ <- binders]
+matchArmFreeVars (MatchArm constructorName names result) = freeVars result `Set.difference` Set.fromList names
 
 freeVars :: Term -> Set.Set VariableName
 freeVars (TermVar name) = Set.singleton name
@@ -93,7 +92,7 @@ alphaCanonUnderNameList names t = (names', t')
         names' = indexToName <$> [?nextIndex .. lastIndex - 1]
         t' = let
                 ?nextIndex = lastIndex
-                ?renamings = Data.List.foldl' (\m (name, name') -> Map.insert name name' m) ?renamings (zip names names')
+                ?renamings = Data.List.foldl' (\m (name, name') -> Map.insert name name' m) ?renamings (assertingZip names names')
             in alphaCanonicalizeInner t
 
 alphaCanonicalizeInner :: (?nextIndex :: Int, ?renamings :: Map.Map VariableName VariableName) => Term -> Term
@@ -125,27 +124,32 @@ alphaCanonicalizeInner (TermMatch scrutinee inClause returnClause matchArms) = T
                 in
                     (
                         InPresent constructorName $ vars',
-                        Map.fromList (zip vars vars') `Map.union` ?renamings
+                        Map.fromList (assertingZip vars vars') `Map.union` ?renamings
                     )
             InAbsent -> (InAbsent, ?renamings)
         returnClause' = let ?renamings = returnClauseRenamings in alphaCanonicalizeInner <$> returnClause
         -- We have to sort by constructor name here to avoid being sensitive to that.
         matchArms' = Data.List.sortOn (\(MatchArm constructorName _ _) -> constructorName) [
-                let (names, body') = alphaCanonUnderNameList [name | Binder name _ <- binders] body in
-                MatchArm constructorName [Binder name Nothing | name <- names] body' |
-                MatchArm constructorName binders body <- matchArms
+                MatchArm constructorName names' body' |
+                MatchArm constructorName names body <- matchArms,
+                let (names', body') = alphaCanonUnderNameList names body
             ]
 alphaCanonicalizeInner (TermAnnot e ty) = TermAnnot (alphaCanonicalizeInner e) (alphaCanonicalizeInner ty)
 alphaCanonicalizeInner e@(TermSortType _) = e
 alphaCanonicalizeInner e@TermSortProp = e
 
-alphaCanonicalize :: ValCtx -> Term -> Term
-alphaCanonicalize vc t = let
+alphaCanonicalize :: ValCtx -> TypeCtx -> Term -> Term
+alphaCanonicalize vc tc t = let
         ?nextIndex = 0
-        ?renamings = Map.fromList [(name, name) | (name, _) <- Map.toList vc]
+        ?renamings = Map.empty --Map.fromList [(name, name) | (name, _) <- Map.toList vc ++ Map.toList tc]
     in alphaCanonicalizeInner t
 --alphaCanonicalize vc x = fst $ State.runState (alphaCanonicalizeInner x) startingMapping
 --    where startingMapping = Map.fromList [(name, name) | (name, _) <- Map.toList vc]
+
+-- I think maybe I should just leave free variables free...
+compareTerms :: ValCtx -> TypeCtx -> Term -> Term -> Bool
+compareTerms vc tc a b = normed a == normed b
+    where normed t = alphaCanonicalize vc tc $ normalizeOnce CBV vc t
 
 type FreshState = State.State Int
 
@@ -205,9 +209,9 @@ subst old new (TermMatch scrutinee inClause returnClause matchArms) =
     TermMatch (r scrutinee) inClause returnClause (substInArm <$> matchArms)
     where
         r = subst old new
-        substInArm arm@(MatchArm constructorName binders body)
-            | old `elem` [name | Binder name _ <- binders] = arm
-            | otherwise = MatchArm constructorName binders (r body)
+        substInArm arm@(MatchArm constructorName names body)
+            | old `elem` names = arm
+            | otherwise = MatchArm constructorName names (r body)
 
 subst old new (TermAnnot e ty) = TermAnnot (r e) (r ty)
     where r = subst old new
@@ -234,8 +238,8 @@ deleteKeys keys m = foldr Map.delete m keys
 --etaExpandFix fix@(TermFix recName b@(Binder recArgName _) optionalTypeAnnot body) =
 --    TermAbs b (TermApp (TermAbs (Binder recName Nothing) body) fix)
 
-formLetIn :: Binder -> Term -> Term -> Term
-formLetIn binder x y = TermApp (TermAbs binder y) x
+--formLetIn :: Binder -> Term -> Term -> Term
+--formLetIn binder x y = TermApp (TermAbs binder y) x
 
 normalize :: NormalizationStrategy -> ValCtx -> Term -> FreshState Term
 --normalize ns vc t = normalize' ns vc (traceStop ("Normalizing (ctx=" ++ (show $ Map.keys vc) ++ ") " ++ ScowproofDesugar.prettyTerm 0 t) t)
@@ -286,26 +290,6 @@ normalize' ns vc (TermAbs (Binder name ty) body) = do
     let normedBody = subst name (TermVar newName) body
     return $ TermAbs (Binder newName normedTy) normedBody
 
-{-
-(
-    (fix f arg {body})
-    val
-)
-->
-(
-    let f = (fix f arg {body}) in
-    let arg = val in
-    body
-)
-->
-(
-    (fun f =>
-        (fun arg => body) val
-    )
-    (fix f arg {body})
-)
--}
-
 -- For some reason Bauer doesn't normalize inside of products in Spartan type theory, but I do.
 normalize' WHNF vc t@(TermPi binder ty) = return t
 normalize' CBV vc (TermPi binder ty) = TermPi <$> normalizeBinder CBV vc binder <*> normalize CBV vc ty
@@ -322,14 +306,14 @@ normalize' CBV vc t@(TermFix recName binder optionalTy body) =
 normalize' ns vc t@(TermMatch scrutinee inClause returnClause matchArms) = do
     scrutinee' <- normalize ns vc scrutinee
     case [
-            (binders, applied) |
-            MatchArm constructorName binders body <- matchArms,
-            -- Should I maybe store my binders in pre-reversed order?
+            (argNames, applied) |
+            MatchArm constructorName argNames body <- matchArms,
+            -- Should I maybe store the argNames in pre-reversed order?
             -- Also, how do I do this with a "let Just applied = ..." instead? That gives an irrefutable pattern issue.
-            Just applied <- [matchAppSpine constructorName (reverse binders) scrutinee' body]
+            Just applied <- [matchAppSpine constructorName (reverse argNames) scrutinee' body]
         ] of
             -- Here the return value is still in head position, so we must keep normalizing, even in WHNF.
-            (binders, result) : _ -> normalize ns (armContext binders) result
+            (argNames, result) : _ -> normalize ns (armContext argNames) result
             -- Here the match arms won't be in head position, so we potentially stop normalizing them.
             [] -> do
                 let vcReturn = deleteKeys (inVariables inClause) vc
@@ -340,50 +324,56 @@ normalize' ns vc t@(TermMatch scrutinee inClause returnClause matchArms) = do
                     inVariables (InPresent _ vars) = vars
                     inVariables InAbsent = []
                     normalizeArm WHNF arm = return arm
-                    normalizeArm CBV (MatchArm constructorName binders body) = do
-                        body' <- normalize ns (armContext binders) body
-                        return $ MatchArm constructorName binders body'
+                    normalizeArm CBV (MatchArm constructorName argNames body) = do
+                        body' <- normalize ns (armContext argNames) body
+                        return $ MatchArm constructorName argNames body'
     where
         --matchAppSpine' a b c d =
         --    trace ("(Matching " ++ show c ++ " with " ++ show a ++ " " ++ show b ++ " in ctx: " ++ show (Map.keys vc) ++ ")") (matchAppSpine a b c d)
-        matchAppSpine :: VariableName -> [Binder] -> Term -> Term -> Maybe Term
+        matchAppSpine :: VariableName -> [VariableName] -> Term -> Term -> Maybe Term
         matchAppSpine constructorName [] (TermVar constructorName2) body
             | (constructorName == constructorName2) = Just body
             | otherwise = Nothing
-        matchAppSpine constructorName (binder:binders) (TermApp fn arg) body = do
-            next <- matchAppSpine constructorName binders fn body
-            return $ TermApp (TermAbs binder next) arg
+        matchAppSpine constructorName (name:argNames) (TermApp fn arg) body = do
+            next <- matchAppSpine constructorName argNames fn body
+            -- XXX: We could pretty readily replace this Nothing with the looked up arg type from the inductive definition. Should we?
+            return $ TermApp (TermAbs (Binder name Nothing) next) arg
         -- Be careful here; I maybe want to error out on some ill-formed cases here.
         matchAppSpine _ _ _ _ = Nothing
-        armContext binders = deleteKeys [name | Binder name _ <- binders] vc
+        armContext argNames = deleteKeys argNames vc
 
 normalize' WHNF vc (TermAnnot e ty) = TermAnnot <$> normalize WHNF vc e <*> return ty
 normalize' CBV  vc (TermAnnot e ty) = TermAnnot <$> normalize CBV vc e <*> normalize CBV vc ty
-
-{-
-nat::S [x, y, z] => body
-
-(App
-    (App
-        (App
-            (Var nat::S)
-            a
-        )
-        b
-    )
-    c
-)
-
-let z = c in
-let y = b in
-let x = a in
-    (<- normalize ns vc body)
--}
 
 -- Passed through.
 normalize' _ _ t@(TermSortType _) = return t
 normalize' _ _ t@TermSortProp = return t
 
+-- Given nested applications of the form:
+--   (TermApp (TermApp (TermApp head x) y) z)
+-- Return (head, [x, y, z])
+extractAppSpine :: Term -> (Term, [Term])
+extractAppSpine = unwrap []
+    where
+        unwrap accum (TermApp head arg) = unwrap (arg : accum) head
+        unwrap accum head = (head, accum)
+
+extractProductSort :: Term -> Term
+extractProductSort (TermPi _ t) = extractProductSort t
+extractProductSort t@(TermSortType _) = t
+extractProductSort t@TermSortProp = t
+
+globalTyping :: ScowproofDesugar.GlobalScope -> TypeCtx
+globalTyping globalScope = Map.fromList $ ScowproofDesugar.globalInductives globalScope >>= getInductiveTypings
+    where
+        getInductiveTypings :: Inductive -> [(VariableName, Term)]
+        getInductiveTypings (Inductive indName binders annot constructors) =
+            (indName, overallInductiveSort) : (constructorTyping <$> constructors)
+            where
+                overallInductiveSort = extractProductSort $ fromJust annot
+                constructorTyping (InductiveConstructor constructorName ty) = (indName ++ "::" ++ constructorName, ty)
+
+{-
 traceVal msg x = traceStop (msg ++ ": " ++ show x) x
 
 traceStop :: String -> a -> a
@@ -392,24 +382,50 @@ traceStop msg x = System.IO.Unsafe.unsafePerformIO $ do
     putStrLn msg
     _ <- getChar
     return x
+-}
 
 normalizeOnce :: NormalizationStrategy -> ValCtx -> Term -> Term
 normalizeOnce ns vc t = fst $ State.runState (normalize ns vc t) 0
-
-coerceToProduct = id
 
 isSort :: Term -> Bool
 isSort (TermSortType _) = True
 isSort TermSortProp = True
 isSort _ = False
 
+-- Take a nested term of the form:
+--   (TermPi (Binder name1 ty1) (TermPi (Binder name2 ty2) ...))
+-- and return [ty1, ty2, ...]
+getProductTypes :: Term -> [Term]
+getProductTypes (TermPi (Binder _ Nothing) _) = error "BUG: Well-formedness admitted a constructor with holes in its product"
+getProductTypes (TermPi (Binder _ (Just ty)) tail) = ty : getProductTypes tail
+getProductTypes _ = []
+
+assertingZip :: [a] -> [b] -> [(a, b)]
+assertingZip x y
+    | length x == length y = zip x y
+    | otherwise = error "Zip lengths don't match"
+
+-- Takes a type context, constructor name, list of names on the constructor, and produces the context that the match
+-- arm's body should be interpreted in. This is done by first looking up the constructor's type. It should be of the form
+--   (TermPi (Binder name1 ty1) (TermPi (Binder name2 ty2 ...)))
+-- ultimately terminating in a sort. We unpack these types, and match them up with the names we're binding.
+-- Well-formedness checking guarantees that the names are all distinct, and therefore insertion order doesn't matter.
+makeMatchArmTypeCtx :: TypeCtx -> VariableName -> [VariableName] -> TypeCtx
+makeMatchArmTypeCtx tc constructorName argNames = Map.fromList argTypings `Map.union` tc
+    where
+        --Just constructorTy = trace ("Lookup at: " ++ constructorName ++ " with: " ++ show tc) (Map.lookup constructorName tc)
+        Just constructorTy = Map.lookup constructorName tc
+        argTypings = assertingZip argNames (getProductTypes constructorTy)
+
 infer :: ValCtx -> TypeCtx -> Term -> ExceptStr Term
 infer vc tc (TermVar name) = case (Map.lookup name vc, Map.lookup name tc) of
+    (Just t, Just ty) -> throwError $ "Uh oh! I'm not sure I should ever have both a value and type in the context!? For: " ++ name
     (_, Just ty) -> return ty
     (Just t, _) -> infer vc tc t
     _ -> throwError $ "No type or definition for variable: " ++ name
 infer vc tc (TermApp fn arg) = do
-    fnType <- coerceToProduct <$> infer vc tc fn
+    -- FIXME: Is this normalizeOnce sufficiently fresh?
+    fnType <- normalizeOnce WHNF vc <$> infer vc tc fn
     (Binder argName optionalArgTy, fnResultTy) <- case fnType of
         TermPi binder body -> return (binder, body)
         _ -> throwError "Function types must be products"
@@ -417,35 +433,66 @@ infer vc tc (TermApp fn arg) = do
         Just ty -> return ty
         _ -> throwError "Function types in applications must infer with concrete argument types"
     argTypeCorrect <- check vc tc arg argTy
-    when (not argTypeCorrect) (throwError "Application ill-typed")
+    when (not argTypeCorrect) $ throwError "Application ill-typed"
     return $ subst argName arg fnResultTy
 infer vc tc (TermAbs (Binder argName (Just argTy)) body) = do
     argSort <- infer vc tc argTy
-    when (not (isSort argSort)) (throwError "Abstraction argument types must live in a sort")
+    when (not (isSort argSort)) $ throwError "Abstraction argument types must live in a sort"
     resultTy <- infer vc (Map.insert argName argTy tc) body
     return $ TermPi (Binder argName (Just argTy)) resultTy
-infer vc tc (TermAbs _ _) = throwError "Abstractions must have an argument type"
+infer vc tc t@(TermAbs _ _) = throwError $ "Abstractions must have an argument type: " ++ ScowproofDesugar.prettyTerm 2 t
 infer vc tc (TermPi (Binder argName (Just argTy)) body) = do
     argSort <- infer vc tc argTy
-    when (not (isSort argSort)) (throwError "Product argument types must live in a sort")
+    when (not (isSort argSort)) $ throwError "Product argument types must live in a sort"
     resultSort <- infer vc (Map.insert argName argTy tc) body
-    when (not (isSort resultSort)) (throwError "Product result types must live in a sort")
+    when (not (isSort resultSort)) $ throwError "Product result types must live in a sort"
     return $ resultSort
 infer vc tc (TermPi _ _) = throwError "Products must have an argument type"
+infer vc tc (TermFix recName recArgBinder@(Binder recArgName (Just recArgTy)) (Just returnTy) body) = do
+    recArgSort <- infer vc tc recArgTy
+    when (not (isSort recArgSort)) $ throwError "Fixed point argument types must live in a sort"
+    let overallType = (TermPi recArgBinder returnTy)
+    -- Insertion order doesn't matter due to well-formedness check earlier.
+    let recursiveTypeCtx = Map.insert recName overallType (Map.insert recArgName recArgTy tc)
+    recursiveTypeCorrect <- check vc recursiveTypeCtx body returnTy
+    when (not recursiveTypeCorrect) $ throwError "Fixed point body fails to type check"
+    return overallType
+infer vc tc (TermFix _ _ _ _) = throwError "Fixed points must have an argument type and return type"
+
+-- This is by far the most complicated case.
+infer vc tc (TermMatch scrutinee inClause returnClause matchArms) = do
+    returnTy <- case (returnClause, matchArms) of
+        (Just t, _) -> return t
+        (_, []) -> throwError "For now matches with no arms need an explicit return type"
+        -- If we have no return clause, but at least one arm then just infer our return type from the first arm.
+        (_, (MatchArm constructorName names body) : _) ->
+            infer vc (makeMatchArmTypeCtx tc constructorName names) body
+    scrutineeTy <- normalizeOnce WHNF vc <$> infer vc tc scrutinee
+    let (scrutineeTyHead, scrutineeTyArgs) = extractAppSpine scrutineeTy
+    inductiveName <- case scrutineeTyHead of
+        (TermVar inductiveName) -> return inductiveName
+        _ -> throwError "Scrutinee of match failed to WHNFify to having a variable in head position"
+    
+    -- FIXME: Properly implement this check, and do the appropriate substitutions into returnTy for dependent matches.
+    return returnTy
+    --return TermSortProp
+    --trace ("Inductive name: " ++ inductiveName ++ " scrutinee ty: " ++ show scrutineeTy) (return TermSortProp) -- XXX FIXME
+
+infer vc tc (TermAnnot e ty) = do
+    annotSort <- infer vc tc ty
+    when (not (isSort annotSort)) $ throwError "Annotations must live in a sort"
+    annotationCheck <- check vc tc e ty
+    when (not annotationCheck) $ throwError "Annotation failed"
+    return ty
 infer _ _ (TermSortType universeIndex) = return $ TermSortType (universeIndex + 1)
 -- Does this make sense?
 infer _ _ TermSortProp = return $ TermSortType 0
 
--- Do I need the TypeCtx? Like, can I alpha canonicalize something that only has a typing?
-compareTerms :: ValCtx -> Term -> Term -> Bool
-compareTerms vc a b = normed a == normed b
-    where normed t = alphaCanonicalize vc $ normalizeOnce CBV vc t
-
 check :: ValCtx -> TypeCtx -> Term -> Term -> ExceptStr Bool
---check ctx _ = undefined
 check vc tc e ty = do
     inferredTy <- infer vc tc e
-    return $ compareTerms vc ty inferredTy
+    --seq (trace ("CHECK: " ++ ScowproofDesugar.prettyTerm 0 e ++ " : " ++  ScowproofDesugar.prettyTerm 0 inferredTy ++ " = " ++ ScowproofDesugar.prettyTerm 0 ty) ()) $ return ()
+    return $ compareTerms vc tc ty inferredTy
 
 {-
       TermVar VariableName

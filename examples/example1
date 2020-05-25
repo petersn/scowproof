@@ -4,6 +4,21 @@ inductive nat : Set {
     S : nat -> nat;
 }
 
+inductive False : Prop {}
+inductive True : Prop { I : True }
+
+fixpoint plus (x y : nat) : nat {
+    match x {
+        nat::O => y;
+        nat::S x' => plus x' (nat::S y);
+    }
+}
+
+infer nat;
+
+infer plus;
+
+/*
 fixpoint zero (x : nat) : nat {
     match x {
         nat::O => 0;
@@ -18,12 +33,6 @@ let plus =
                 nat::O => y;
                 nat::S x' => plus x' (nat::S y);
             }
-    };
-
-let plusUnfold (x y : nat) : nat =
-    match x {
-        nat::O => y;
-        nat::S x' => plus x' (nat::S y);
     };
 
 //eval zero 2;
@@ -41,17 +50,9 @@ alphacanon match (fun x => x) {
     nat::S x => fix f (x : x) : x { fun z => x y f };
     nat::O => x;
 };
+*/
 
 //eval plusUnfold 0;
-
-/*
-fixpoint plus (x y : nat) : nat {
-    match x {
-        nat::O => y;
-        nat::S x' => plus x' (nat::S y);
-    }
-}
-*/
 
 /*
 let pred (x : nat) =
@@ -107,3 +108,25 @@ let nat_ind =
 
 check nat_ind : nat_ind_type;
 */
+
+let nat_ind_type =
+    forall (P : nat -> Prop),
+        P nat::O ->
+        (forall (n : nat), P n -> P (nat::S n)) ->
+        forall (n : nat), P n;
+
+let nat_ind =
+    fun
+        (P : nat -> Prop)
+        (base_case : P nat::O)
+        (inductive_step : forall (n : nat), P n -> P (nat::S n))
+    =>
+        fix inductive_hypothesis (n : nat) : P n {
+            match n return P n {
+                nat::O => base_case;
+                nat::S n' => inductive_step n' (inductive_hypothesis n');
+            }
+        };
+
+infer nat_ind;
+check nat_ind : nat_ind_type;

@@ -20,9 +20,9 @@ desugarMatchArm (MatchArmExpr pat result) = MatchArm (innerName pat) (foldBinder
         -- Quadratic time, but who cares.
         foldBinders (ExprVar name) = []
         foldBinders (ExprApp inner (ExprVar name)) =
-            foldBinders inner ++ [Binder name Nothing]
-        foldBinders (ExprApp inner (ExprAnnot (ExprVar name) ty)) =
-            foldBinders inner ++ [Binder name (Just $ desugarExpr ty)]
+            foldBinders inner ++ [name]
+        --foldBinders (ExprApp inner (ExprAnnot (ExprVar name) ty)) =
+        --    foldBinders inner ++ [Binder name (Just $ desugarExpr ty)]
 
 -- In Coq an in clause is required to be an inductive constructor, followed by enough _s to saturate
 -- the parameters, followed by enough identifiers to saturate the arity. These identifiers are then
@@ -71,8 +71,12 @@ desugarExpr (ExprLet typedName val body) =
 desugarExpr (ExprPi arguments expr)      = foldr (foldrHelper TermPi) (desugarExpr expr) arguments
 desugarExpr (ExprArrow from to)          = TermPi (Binder "_" (Just $ desugarExpr from)) (desugarExpr to)
 desugarExpr (ExprFix fixName arguments optionalExprAnnot body) =
-    TermFix fixName (desugarTypedName $ head arguments) (desugarExpr <$> optionalExprAnnot) unfoldedBody
-    where unfoldedBody = foldr (foldrHelper TermAbs) (desugarExpr body) $ drop 1 arguments
+    TermFix fixName (desugarTypedName $ head arguments) annot unfoldedBody
+    where
+        unfoldedBody = foldr (foldrHelper TermAbs) (desugarExpr body) $ drop 1 arguments
+        annot = do
+            returnTy <- desugarExpr <$> optionalExprAnnot
+            return $ foldr (foldrHelper TermPi) returnTy $ drop 1 arguments
 
 -- Here we desugar:
 --   match m as x in I y1 y2 y3 return P { ... m ... }
@@ -96,9 +100,18 @@ desugarExpr (ExprAnnot expr ty) = TermAnnot (desugarExpr expr) (desugarExpr ty)
 desugarExpr (ExprLit (LitNat n)) = iterate wrapWithSucc (TermVar "nat::O") !! fromIntegral n
     where wrapWithSucc t = (TermApp (TermVar "nat::S") t)
 
+desugarInductiveConstructor :: InductiveConstructorExpr -> InductiveConstructor
+desugarInductiveConstructor (InductiveConstructorExpr constructorName binders expr) =
+    InductiveConstructor constructorName constructorBaseTy
+    where constructorBaseTy = foldr (foldrHelper TermPi) (desugarExpr expr) binders
+
+desugarInductive :: Vernac -> Inductive
+desugarInductive (VernacInductive name binders annot constructors) =
+    Inductive name (desugarTypedName <$> binders) (desugarExpr <$> annot) (desugarInductiveConstructor <$> constructors)
+
 data GlobalScope = GlobalScope {
-    globalTerms :: Map.Map VariableName Term,
-    globalInductives :: Map.Map VariableName Inductive,
+    globalTerms :: [(VariableName, Term)],
+    globalInductives :: [Inductive],
     globalCommands :: [Command]
 } deriving (Show, Eq, Ord)
 
@@ -109,17 +122,21 @@ definitionToTerm _ = Nothing
 
 makeGlobalScope :: [Vernac] -> GlobalScope
 makeGlobalScope vernacs = GlobalScope {
-    globalTerms = Map.fromList [
-        (name, t) |
-        def@(VernacDefinition name _ _ _) <- vernacs,
-        let Just t = definitionToTerm def
-    ],
-    globalInductives = Map.fromList [],
-    globalCommands = [cmd | VernacCommand cmd <- vernacs]
-}
+        globalTerms = [
+            (name, t) |
+            def@(VernacDefinition name _ _ _) <- vernacs,
+            let Just t = definitionToTerm def
+        ],
+        globalInductives = [desugarInductive ind | ind@(VernacInductive name _ _ _) <- vernacs],
+        globalCommands = [cmd | VernacCommand cmd <- vernacs]
+    }
 
 newLine :: Int -> String
 newLine d = "\n" ++ replicate d ' '
+
+subscriptize :: String -> String
+subscriptize = map (\a -> Map.findWithDefault a a subscripts)
+    where subscripts = Map.fromList $ zip "0123456789" "₀₁₂₃₄₅₆₇₈₉"
 
 prettyBinder :: Int -> Binder -> String
 prettyBinder d (Binder name Nothing) = name
@@ -148,7 +165,7 @@ prettyTerm d (TermMatch scrutinee inClause returnClause matchArms) =
     where
         prettiedArms = intercalate (newLine (d + ipl)) $ map (++ ";") $ prettyArm <$> matchArms
         prettyArm (MatchArm constructorName arguments result) =
-            constructorName ++ (prettyBinder (d + ipl) <$> arguments >>= (" " ++)) ++ " => " ++ prettyTerm (d + ipl) result
+            constructorName ++ (arguments >>= (" " ++)) ++ " => " ++ prettyTerm (d + ipl) result
         inText
             | InPresent constructorName arityNames <- inClause =
                 " in " ++ intercalate " " (constructorName : arityNames)
@@ -158,5 +175,5 @@ prettyTerm d (TermMatch scrutinee inClause returnClause matchArms) =
             | otherwise = ""
 
 prettyTerm d (TermAnnot e ty) = "(" ++ prettyTerm d e ++ " : " ++ prettyTerm d ty ++ ")"
-prettyTerm d (TermSortType n) = "𝕋" ++ show n
+prettyTerm d (TermSortType n) = "𝕋" ++ (subscriptize $ show n)
 prettyTerm d TermSortProp = "ℙ"

@@ -10,7 +10,7 @@ type ValCtx = Map.Map VariableName Term
 type TypeCtx = Map.Map VariableName Term
 
 data Binder = Binder VariableName OptionalTypeAnnot deriving (Show, Eq, Ord)
-data MatchArm = MatchArm VariableName [Binder] Term deriving (Show, Eq, Ord)
+data MatchArm = MatchArm VariableName [VariableName] Term deriving (Show, Eq, Ord)
 
 data InClause =
       InPresent VariableName [VariableName]
@@ -21,14 +21,19 @@ data Term =
       TermVar VariableName
     | TermApp Term Term
     | TermAbs Binder Term
---    | TermLet Binder Term Term
     | TermPi Binder Term
     | TermFix VariableName Binder OptionalTypeAnnot Term
-    -- The (Maybe Term) is the return clause.
     | TermMatch Term InClause (Maybe Term) [MatchArm]
     | TermAnnot Term Term
     | TermSortType UniverseIndex
     | TermSortProp
     deriving (Show, Eq, Ord)
 
-data Inductive = Inductive deriving (Show, Eq, Ord)
+data InductiveConstructor = InductiveConstructor VariableName Term deriving (Show, Eq, Ord)
+data Inductive = Inductive {
+    inductiveName :: VariableName,
+    inductiveParameters :: [Binder],
+    inductiveArity :: OptionalTypeAnnot,
+    inductiveConstructors :: [InductiveConstructor]
+    --Inductive VariableName [Binder] OptionalTypeAnnot [InductiveConstructor]
+} deriving (Show, Eq, Ord)

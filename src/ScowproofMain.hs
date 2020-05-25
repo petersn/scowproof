@@ -15,23 +15,25 @@ runCommand globalScope (ScowproofParse.CmdInfer expr) = do
         Right resultTerm -> putStrLn $ "=      " ++ ScowproofDesugar.prettyTerm 7 resultTerm
     where
         term = ScowproofDesugar.desugarExpr expr
-        valCtx = ScowproofDesugar.globalTerms globalScope
-        errOrResultTerm = Control.Monad.Except.runExcept $ ScowproofKernel.infer valCtx Map.empty term
+        valCtx = Map.fromList $ ScowproofDesugar.globalTerms globalScope
+        typeCtx = ScowproofKernel.globalTyping globalScope
+        errOrResultTerm = Control.Monad.Except.runExcept $ ScowproofKernel.infer valCtx typeCtx term
 runCommand globalScope (ScowproofParse.CmdCheck termExpr typeExpr) = putStrLn "Check not implemented"
 runCommand globalScope (ScowproofParse.CmdEval expr) = do
     putStrLn $ "Eval: " ++ ScowproofDesugar.prettyTerm 6 term
     putStrLn $ "=     " ++ ScowproofDesugar.prettyTerm 6 resultTerm
     where
         term = ScowproofDesugar.desugarExpr expr
-        valCtx = ScowproofDesugar.globalTerms globalScope
+        valCtx = Map.fromList $ ScowproofDesugar.globalTerms globalScope
         resultTerm = ScowproofKernel.normalizeOnce ScowproofKernel.WHNF valCtx term
 runCommand globalScope (ScowproofParse.CmdAlphaCanon expr) = do
     putStrLn $ "Alpha canonicalize:\n  " ++ ScowproofDesugar.prettyTerm 2 term
     putStrLn $ "= " ++ ScowproofDesugar.prettyTerm 2 resultTerm
     where
         term = ScowproofDesugar.desugarExpr expr
-        valCtx = ScowproofDesugar.globalTerms globalScope
-        resultTerm = ScowproofKernel.alphaCanonicalize valCtx term
+        valCtx = Map.fromList $ ScowproofDesugar.globalTerms globalScope
+        typeCtx = ScowproofKernel.globalTyping globalScope
+        resultTerm = ScowproofKernel.alphaCanonicalize valCtx typeCtx term
 
 main :: IO ()
 main = do
@@ -54,7 +56,7 @@ main = do
 
     putStrLn "===== Terms ====="
     let printExpr (name, term) = putStrLn $ name ++ " = " ++ ScowproofDesugar.prettyTerm 0 term in
-        mapM_ printExpr $ Map.toList (ScowproofDesugar.globalTerms globalScope)
+        mapM_ printExpr $ ScowproofDesugar.globalTerms globalScope
 
     putStrLn "\n===== Commands ====="
     mapM_ (runCommand globalScope) $ ScowproofDesugar.globalCommands globalScope
